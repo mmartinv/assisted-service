@@ -38,7 +38,21 @@ type baremetal struct {
 type platform struct {
 	Baremetal *baremetal       `yaml:"baremetal,omitempty"`
 	None      *platformNone    `yaml:"none,omitempty"`
-	Vsphere   *platformVsphere `yaml:"vsphere"`
+	Vsphere   *platformVsphere `yaml:"vsphere,omitempty"`
+	Ovirt     *platformOvirt   `yaml:"ovirt,omitempty"`
+}
+
+type platformOvirt struct {
+	APIVIP               string          `yaml:"api_vip"`
+	IngressVIP           string          `yaml:"ingress_vip"`
+	OvirtClusterID       strfmt.UUID     `yaml:"ovirt_cluster_id"`
+	OvirtNetworkName     string          `yaml:"ovirt_network_name"`
+	OvirtStorageDomainID strfmt.UUID     `yaml:"ovirt_storage_domain_id"`
+	OvirtVnicProfileID   strfmt.UUID     `yaml:"vnicProfileID"`
+	OvirtURL             string          `yaml:"ovirt_url"`
+	OvirtUserName        string          `yaml:"ovirt_username"`
+	OvirtPassword        strfmt.Password `yaml:"ovirt_password"`
+	OvirtInsecure        bool            `yaml:"ovirt_insecure"`
 }
 
 type platformVsphere struct {
@@ -56,6 +70,77 @@ type platformVsphere struct {
 
 type platformNone struct {
 }
+
+type MachinePoolPlatform struct {
+	Ovirt *OvirtMachinePool `yaml:"ovirt,omitempty"`
+}
+
+type OvirtMachinePool struct {
+	// InstanceTypeID defines the VM instance type and overrides
+	// the hardware parameters of the created VM, including cpu and memory.
+	// If InstanceTypeID is passed, all memory and cpu variables will be ignored.
+	InstanceTypeID string `yaml:"instanceTypeID,omitempty"`
+
+	// CPU defines the VM CPU.
+	// +optional
+	CPU *CPU `yaml:"cpu,omitempty"`
+
+	// MemoryMB is the size of a VM's memory in MiBs.
+	// +optional
+	MemoryMB int32 `yaml:"memoryMB,omitempty"`
+
+	// OSDisk is the the root disk of the node.
+	// +optional
+	OSDisk *Disk `yaml:"osDisk,omitempty"`
+
+	// VMType defines the workload type of the VM.
+	// +kubebuilder:validation:Enum="";desktop;server;high_performance
+	// +optional
+	VMType VMType `yaml:"vmType,omitempty"`
+
+	// AffinityGroupsNames contains a list of oVirt affinity group names that the newly created machines will join.
+	// The affinity groups should exist on the oVirt cluster or created by the OpenShift installer.
+	// +optional
+	AffinityGroupsNames []string `yaml:"affinityGroupsNames"`
+}
+
+// Disk defines a VM disk
+type Disk struct {
+	// SizeGB size of the bootable disk in GiB.
+	SizeGB int64 `yaml:"sizeGB"`
+}
+
+// CPU defines the VM cpu, made of (Sockets * Cores).
+type CPU struct {
+	// Sockets is the number of sockets for a VM.
+	// Total CPUs is (Sockets * Cores)
+	Sockets int32 `yaml:"sockets"`
+	// Cores is the number of cores per socket.
+	// Total CPUs is (Sockets * Cores)
+	Cores int32 `yaml:"cores"`
+}
+
+// VMType defines the type of the VM, which will change the VM configuration,
+// like including or excluding devices (like excluding sound-card),
+// device configuration (like using multi-queues for vNic), and several other
+// configuration tweaks. This doesn't effect properties like CPU count and amount of memory.
+type VMType string
+
+const (
+	// VMTypeDesktop set the VM type to desktop. Virtual machines optimized to act
+	// as desktop machines do have a sound card, use an image (thin allocation),
+	// and are stateless.
+	VMTypeDesktop VMType = "desktop"
+	// VMTypeServer sets the VM type to server. Virtual machines optimized to act
+	// as servers have no sound card, use a cloned disk image, and are not stateless.
+	VMTypeServer VMType = "server"
+	// VMTypeHighPerformance sets a VM type to high_performance which sets various
+	// properties of a VM to optimize for performance, like enabling headless mode,
+	// disabling usb, smart-card, and sound devices, enabling host cpu pass-through,
+	// multi-queues for vNics and several more items.
+	// See https://www.ovirt.org/develop/release-management/features/virt/high-performance-vm.html.
+	VMTypeHighPerformance VMType = "high_performance"
+)
 
 type bootstrapInPlace struct {
 	InstallationDisk string `yaml:"installationDisk,omitempty"`
@@ -91,14 +176,16 @@ type InstallerConfigBaremetal struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Compute []struct {
-		Hyperthreading string `yaml:"hyperthreading,omitempty"`
-		Name           string `yaml:"name"`
-		Replicas       int    `yaml:"replicas"`
+		Hyperthreading string              `yaml:"hyperthreading,omitempty"`
+		Name           string              `yaml:"name"`
+		Replicas       int                 `yaml:"replicas"`
+		Platform       MachinePoolPlatform `yaml:"platform,omitempty"`
 	} `yaml:"compute"`
 	ControlPlane struct {
-		Hyperthreading string `yaml:"hyperthreading,omitempty"`
-		Name           string `yaml:"name"`
-		Replicas       int    `yaml:"replicas"`
+		Hyperthreading string              `yaml:"hyperthreading,omitempty"`
+		Name           string              `yaml:"name"`
+		Replicas       int                 `yaml:"replicas"`
+		Platform       MachinePoolPlatform `yaml:"platform,omitempty"`
 	} `yaml:"controlPlane"`
 	Platform              platform             `yaml:"platform"`
 	BootstrapInPlace      bootstrapInPlace     `yaml:"bootstrapInPlace,omitempty"`
@@ -221,9 +308,10 @@ func (i *installConfigBuilder) getBasicInstallConfig(cluster *common.Cluster) (*
 			Name: cluster.Name,
 		},
 		Compute: []struct {
-			Hyperthreading string `yaml:"hyperthreading,omitempty"`
-			Name           string `yaml:"name"`
-			Replicas       int    `yaml:"replicas"`
+			Hyperthreading string              `yaml:"hyperthreading,omitempty"`
+			Name           string              `yaml:"name"`
+			Replicas       int                 `yaml:"replicas"`
+			Platform       MachinePoolPlatform `yaml:"platform,omitempty"`
 		}{
 			{
 				Hyperthreading: i.getHypethreadingConfiguration(cluster, "worker"),
@@ -232,9 +320,10 @@ func (i *installConfigBuilder) getBasicInstallConfig(cluster *common.Cluster) (*
 			},
 		},
 		ControlPlane: struct {
-			Hyperthreading string `yaml:"hyperthreading,omitempty"`
-			Name           string `yaml:"name"`
-			Replicas       int    `yaml:"replicas"`
+			Hyperthreading string              `yaml:"hyperthreading,omitempty"`
+			Name           string              `yaml:"name"`
+			Replicas       int                 `yaml:"replicas"`
+			Platform       MachinePoolPlatform `yaml:"platform,omitempty"`
 		}{
 			Hyperthreading: i.getHypethreadingConfiguration(cluster, "master"),
 			Name:           string(models.HostRoleMaster),
@@ -309,7 +398,58 @@ func (i *installConfigBuilder) setVSpherePlatformInstallConfig(cluster *common.C
 		Vsphere:   vsPlatform,
 		None:      nil,
 		Baremetal: nil,
+		Ovirt:     nil,
 	}
+}
+
+func (i *installConfigBuilder) setOvirtPlatformInstallConfig(cluster *common.Cluster, cfg *InstallerConfigBaremetal) error {
+	if cluster.Platform.Ovirt != nil && cluster.Platform.Ovirt.URL != nil {
+		//TODO get the MachinePoolPlatform data from the cluster hosts' requirements
+		cfg.ControlPlane.Platform = MachinePoolPlatform{
+			Ovirt: &OvirtMachinePool{
+				CPU: &CPU{
+					Cores:   4,
+					Sockets: 1,
+				},
+				MemoryMB: 16384,
+				OSDisk: &Disk{
+					SizeGB: 120,
+				},
+				VMType: VMTypeServer,
+			},
+		}
+		cfg.Compute[0].Platform = MachinePoolPlatform{
+			Ovirt: &OvirtMachinePool{
+				CPU: &CPU{
+					Cores:   4,
+					Sockets: 1,
+				},
+				MemoryMB: 16384,
+				OSDisk: &Disk{
+					SizeGB: 120,
+				},
+				VMType: VMTypeServer,
+			},
+		}
+		cfg.Platform = platform{
+			Baremetal: nil,
+			None:      nil,
+			Vsphere:   nil,
+			Ovirt: &platformOvirt{
+				APIVIP:               cluster.APIVip,
+				IngressVIP:           cluster.IngressVip,
+				OvirtClusterID:       *cluster.Platform.Ovirt.ClusterID,
+				OvirtNetworkName:     *cluster.Platform.Ovirt.NetworkName,
+				OvirtStorageDomainID: *cluster.Platform.Ovirt.StorageDomainID,
+				OvirtVnicProfileID:   *cluster.Platform.Ovirt.VnicProfileID,
+				OvirtURL:             *cluster.Platform.Ovirt.URL,
+				OvirtUserName:        *cluster.Platform.Ovirt.Username,
+				OvirtPassword:        *cluster.Platform.Ovirt.Password,
+				OvirtInsecure:        *cluster.Platform.Ovirt.Insecure,
+			},
+		}
+	}
+	return nil
 }
 
 func (i *installConfigBuilder) setBMPlatformInstallconfig(cluster *common.Cluster, cfg *InstallerConfigBaremetal) error {
@@ -370,6 +510,7 @@ func (i *installConfigBuilder) setBMPlatformInstallconfig(cluster *common.Cluste
 		},
 		None:    nil,
 		Vsphere: nil,
+		Ovirt:   nil,
 	}
 	return nil
 }
@@ -422,6 +563,11 @@ func (i *installConfigBuilder) getInstallConfig(cluster *common.Cluster, addRhCa
 
 	} else if cluster.Platform.Type == models.PlatformTypeVsphere {
 		i.setVSpherePlatformInstallConfig(cluster, cfg)
+	} else if cluster.Platform.Type == models.PlatformTypeOvirt {
+		err = i.setOvirtPlatformInstallConfig(cluster, cfg)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		err = i.setBMPlatformInstallconfig(cluster, cfg)
 		if err != nil {

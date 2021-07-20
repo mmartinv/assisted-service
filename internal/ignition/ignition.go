@@ -353,6 +353,17 @@ type ignitionBuilder struct {
 	mirrorRegistriesBuilder mirrorregistries.MirrorRegistriesConfigBuilder
 }
 
+type OvirtConfig struct {
+	url      string `yaml:"ovirt_url,omitempty"`
+	userName string `yaml:"ovirt_username,omitempty"`
+	password string `yaml:"ovirt_password,omitempty"`
+	insecure bool   `yaml:"ovirt_insecure,omitempty"`
+	//      fqdn     string          `yaml:"ovirt_fqdn,omitempty"`
+	//      caBundle string          `yaml:"ovirt_ca_bundle,omitempty"`
+	//      caFile   string          `yaml:"ovirt_cafile,omitempty"`
+	//      pemUrl   string          `yaml:"ovirt_pem_url,omitempty"`
+}
+
 func NewBuilder(log logrus.FieldLogger, staticNetworkConfig staticnetworkconfig.StaticNetworkConfig, mirrorRegistriesBuilder mirrorregistries.MirrorRegistriesConfigBuilder) IgnitionBuilder {
 	builder := &ignitionBuilder{
 		log:                     log,
@@ -421,6 +432,40 @@ func (g *installerGenerator) Generate(ctx context.Context, installConfig []byte)
 	if err != nil {
 		g.log.WithError(err).Errorf("Failed to check if cluster %s has manifests", g.cluster.ID)
 		return err
+	}
+
+	if g.cluster.Platform.Type == models.PlatformTypeOvirt {
+		ovirtConfigDir := filepath.Join(g.workDir, ".ovirt")
+		err = os.Mkdir(ovirtConfigDir, os.FileMode(0755))
+		if err != nil {
+			g.log.Errorf("Failed to create oVirt Config dir: %s", ovirtConfigDir)
+			return err
+		}
+		ovirtConfigPath := filepath.Join(ovirtConfigDir, "ovirt-config.yaml")
+		oVirtConfig := &OvirtConfig{
+			url:      swag.StringValue(g.cluster.Platform.Ovirt.URL),
+			userName: swag.StringValue(g.cluster.Platform.Ovirt.Username),
+			password: *swag.String(g.cluster.Platform.Ovirt.Password.String()),
+			insecure: swag.BoolValue(g.cluster.Platform.Ovirt.Insecure),
+		}
+		var cfg []byte
+		cfg, err = yaml.Marshal(oVirtConfig)
+		if err != nil {
+			g.log.Error("Failed to marshal oVirt Config")
+			return err
+		}
+		err = ioutil.WriteFile(ovirtConfigPath, cfg, 0600)
+		if err != nil {
+			g.log.Errorf("Failed to write file %s", installConfigPath)
+			return err
+		}
+
+		envVars = append(envVars,
+			"OVIRT_CONFIG="+ovirtConfigDir,
+			"OPENSHIFT_INSTALL_INFRA_ID_OVERRIDE=xxxxx",
+			//"OPENSHIFT_INSTALL_OS_IMAGE_OVERRIDE=",
+		)
+
 	}
 
 	// invoke 'create manifests' command and download cluster manifests to manifests folder

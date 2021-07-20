@@ -1964,6 +1964,30 @@ func (b *bareMetalInventory) updatePlatformParams(params installer.UpdateCluster
 		updates["platform_vsphere_vCenter"] = nil
 		updates["platform_vsphere_folder"] = nil
 	}
+
+	if platform.Type == models.PlatformTypeOvirt {
+		if platform.Ovirt != nil {
+			updates["platform_ovirt_cluster_id"] = platform.Ovirt.ClusterID
+			updates["platform_ovirt_network_name"] = platform.Ovirt.NetworkName
+			updates["platform_ovirt_storage_domain_id"] = platform.Ovirt.StorageDomainID
+			updates["platform_ovirt_vnic_profile_id"] = platform.Ovirt.VnicProfileID
+			updates["platform_ovirt_url"] = platform.Ovirt.URL
+			updates["platform_ovirt_username"] = platform.Ovirt.Username
+			updates["platform_ovirt_password"] = platform.Ovirt.Password
+			updates["platform_ovirt_insecure"] = platform.Ovirt.Insecure
+		}
+	}
+
+	if platform.Ovirt == nil {
+		updates["platform_ovirt_cluster_id"] = nil
+		updates["platform_ovirt_network_name"] = nil
+		updates["platform_ovirt_storage_domain_id"] = nil
+		updates["platform_ovirt_vnic_profile_id"] = nil
+		updates["platform_ovirt_url"] = nil
+		updates["platform_ovirt_username"] = nil
+		updates["platform_ovirt_password"] = nil
+		updates["platform_ovirt_insecure"] = nil
+	}
 }
 
 func (b *bareMetalInventory) updateClusterData(_ context.Context, cluster *common.Cluster, params installer.UpdateClusterParams, usages map[string]models.Usage, db *gorm.DB, log logrus.FieldLogger, interactivity Interactivity) error {

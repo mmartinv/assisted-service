@@ -2492,7 +2492,7 @@ paths:
       parameters:
         - in: path
           name: cluster_id
-          description: The cluster to return preflight requrements for.
+          description: The cluster to return preflight requirements for.
           type: string
           format: uuid
           required: true
@@ -4272,7 +4272,11 @@ definitions:
       schedulable_masters:
         type: boolean
         description: Schedule workloads on masters
-        default: false
+        default: true
+      use_scheduling_defaults:
+        type: boolean
+        description: False if the scheduling of workloads on masters has been set by the user through the API.
+        default: true
       cluster_networks:
         type: array
         description: Cluster networks that are associated with this cluster.
@@ -4446,7 +4450,11 @@ definitions:
       schedulable_masters:
         type: boolean
         description: Schedule workloads on masters
-        default: false
+        default: true
+      use_scheduling_defaults:
+        type: boolean
+        description: False if the scheduling of workloads on masters has been set by the user through the API.
+        default: true
       cluster_networks:
         type: array
         description: Cluster networks that are associated with this cluster.
@@ -4657,7 +4665,11 @@ definitions:
       schedulable_masters:
         type: boolean
         description: Schedule workloads on masters
-        default: false
+        default: true
+      use_scheduling_defaults:
+        type: boolean
+        description: False if the scheduling of workloads on masters has been set by the user through the API.
+        default: true
       updated_at:
         type: string
         format: date-time
@@ -5540,7 +5552,7 @@ definitions:
       key:
         description: The key for the label's key-value pair.
         type: string
-      value: 
+      value:
         description: The value for the label's key-value pair.
         type: string
 

@@ -31,7 +31,7 @@ import (
 )
 
 func (b *bareMetalInventory) V2UpdateHost(ctx context.Context, params installer.V2UpdateHostParams) middleware.Responder {
-	host, err := b.V2UpdateHostInternal(ctx, params)
+	host, err := b.V2UpdateHostInternal(ctx, params, Interactive)
 	if err != nil {
 		return common.GenerateErrorResponder(err)
 	}
@@ -419,7 +419,7 @@ func (b *bareMetalInventory) V2ListFeatureSupportLevels(ctx context.Context, par
 
 func (b *bareMetalInventory) V2ImportCluster(ctx context.Context, params installer.V2ImportClusterParams) middleware.Responder {
 	id := strfmt.UUID(uuid.New().String())
-	c, err := b.V2ImportClusterInternal(ctx, nil, &id, params, common.SkipInfraEnvCreation)
+	c, err := b.V2ImportClusterInternal(ctx, nil, &id, params)
 	if err != nil {
 		return common.GenerateErrorResponder(err)
 	}
@@ -593,16 +593,16 @@ func (b *bareMetalInventory) infraEnvIPXEScript(ctx context.Context, infraEnv *c
 		return "", errors.Errorf("OS image entry '%+v' missing OpenshiftVersion field", osImage)
 	}
 
-	kernelURL, err := imageservice.KernelURL(b.ImageServiceBaseURL, *osImage.OpenshiftVersion, *osImage.CPUArchitecture)
+	kernelURL, err := imageservice.KernelURL(b.ImageServiceBaseURL, *osImage.OpenshiftVersion, *osImage.CPUArchitecture, b.insecureIPXEURLs)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to create kernel URL")
 	}
-	rootfsURL, err := imageservice.RootFSURL(b.ImageServiceBaseURL, *osImage.OpenshiftVersion, *osImage.CPUArchitecture)
+	rootfsURL, err := imageservice.RootFSURL(b.ImageServiceBaseURL, *osImage.OpenshiftVersion, *osImage.CPUArchitecture, b.insecureIPXEURLs)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to create rootfs URL")
 	}
 
-	initrdURL, err := imageservice.InitrdURL(b.ImageServiceBaseURL, infraEnv.ID.String(), *osImage.OpenshiftVersion, *osImage.CPUArchitecture)
+	initrdURL, err := imageservice.InitrdURL(b.ImageServiceBaseURL, infraEnv.ID.String(), *osImage.OpenshiftVersion, *osImage.CPUArchitecture, b.insecureIPXEURLs)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to create initrd URL")
 	}

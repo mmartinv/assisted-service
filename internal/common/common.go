@@ -16,13 +16,6 @@ import (
 	"gorm.io/gorm"
 )
 
-type InfraEnvCreateFlag bool
-
-const (
-	DoInfraEnvCreation   InfraEnvCreateFlag = true
-	SkipInfraEnvCreation InfraEnvCreateFlag = false
-)
-
 const (
 	EnvConfigPrefix = "myapp"
 
@@ -116,10 +109,6 @@ func IsSingleNodeCluster(cluster *Cluster) bool {
 
 func IsDay2Cluster(cluster *Cluster) bool {
 	return swag.StringValue(cluster.Kind) == models.ClusterKindAddHostsCluster
-}
-
-func AreMastersSchedulable(cluster *Cluster) bool {
-	return swag.BoolValue(cluster.SchedulableMasters)
 }
 
 func GetEffectiveRole(host *models.Host) models.HostRole {
@@ -362,4 +351,8 @@ func CanonizeStrings(slice []string) (ret []string) {
 		}
 	}
 	return
+}
+
+func GetHostKey(host *models.Host) string {
+	return host.ID.String() + "@" + host.InfraEnvID.String()
 }

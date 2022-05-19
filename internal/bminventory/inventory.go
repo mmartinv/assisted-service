@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -143,14 +144,14 @@ type InstallerInternals interface {
 	GetCredentialsInternal(ctx context.Context, params installer.V2GetCredentialsParams) (*models.Credentials, error)
 	V2DownloadClusterFilesInternal(ctx context.Context, params installer.V2DownloadClusterFilesParams) (io.ReadCloser, int64, error)
 	V2DownloadClusterCredentialsInternal(ctx context.Context, params installer.V2DownloadClusterCredentialsParams) (io.ReadCloser, int64, error)
-	V2ImportClusterInternal(ctx context.Context, kubeKey *types.NamespacedName, id *strfmt.UUID, params installer.V2ImportClusterParams, v1Flag common.InfraEnvCreateFlag) (*common.Cluster, error)
+	V2ImportClusterInternal(ctx context.Context, kubeKey *types.NamespacedName, id *strfmt.UUID, params installer.V2ImportClusterParams) (*common.Cluster, error)
 	InstallSingleDay2HostInternal(ctx context.Context, clusterId strfmt.UUID, infraEnvId strfmt.UUID, hostId strfmt.UUID) error
 	UpdateClusterInstallConfigInternal(ctx context.Context, params installer.V2UpdateClusterInstallConfigParams) (*common.Cluster, error)
 	CancelInstallationInternal(ctx context.Context, params installer.V2CancelInstallationParams) (*common.Cluster, error)
 	TransformClusterToDay2Internal(ctx context.Context, clusterID strfmt.UUID) (*common.Cluster, error)
 	AddReleaseImage(ctx context.Context, releaseImageUrl, pullSecret, ocpReleaseVersion, cpuArchitecture string) (*models.ReleaseImage, error)
 	GetClusterSupportedPlatformsInternal(ctx context.Context, params installer.GetClusterSupportedPlatformsParams) (*[]models.PlatformType, error)
-	V2UpdateHostInternal(ctx context.Context, params installer.V2UpdateHostParams) (*common.Host, error)
+	V2UpdateHostInternal(ctx context.Context, params installer.V2UpdateHostParams, interactivity Interactivity) (*common.Host, error)
 	GetInfraEnvByKubeKey(key types.NamespacedName) (*common.InfraEnv, error)
 	UpdateInfraEnvInternal(ctx context.Context, params installer.UpdateInfraEnvParams) (*common.InfraEnv, error)
 	RegisterInfraEnvInternal(ctx context.Context, kubeKey *types.NamespacedName, params installer.RegisterInfraEnvParams) (*common.InfraEnv, error)
@@ -158,6 +159,9 @@ type InstallerInternals interface {
 	UnbindHostInternal(ctx context.Context, params installer.UnbindHostParams) (*common.Host, error)
 	BindHostInternal(ctx context.Context, params installer.BindHostParams) (*common.Host, error)
 	GetInfraEnvHostsInternal(ctx context.Context, infraEnvId strfmt.UUID) ([]*common.Host, error)
+	GetKnownHostApprovedCounts(clusterID strfmt.UUID) (registered, approved int, err error)
+	HostWithCollectedLogsExists(clusterId strfmt.UUID) (bool, error)
+	GetKnownApprovedHosts(clusterId strfmt.UUID) ([]*common.Host, error)
 }
 
 //go:generate mockgen --build_flags=--mod=mod -package bminventory -destination mock_crd_utils.go . CRDUtils
@@ -192,6 +196,7 @@ type bareMetalInventory struct {
 	staticNetworkConfig  staticnetworkconfig.StaticNetworkConfig
 	gcConfig             garbagecollector.Config
 	providerRegistry     registry.ProviderRegistry
+	insecureIPXEURLs     bool
 }
 
 func NewBareMetalInventory(
@@ -222,6 +227,7 @@ func NewBareMetalInventory(
 	staticNetworkConfig staticnetworkconfig.StaticNetworkConfig,
 	gcConfig garbagecollector.Config,
 	providerRegistry registry.ProviderRegistry,
+	insecureIPXEURLs bool,
 ) *bareMetalInventory {
 	return &bareMetalInventory{
 		db:                   db,
@@ -251,6 +257,7 @@ func NewBareMetalInventory(
 		staticNetworkConfig:  staticNetworkConfig,
 		gcConfig:             gcConfig,
 		providerRegistry:     providerRegistry,
+		insecureIPXEURLs:     insecureIPXEURLs,
 	}
 }
 
@@ -290,9 +297,6 @@ func (b *bareMetalInventory) setDefaultRegisterClusterParams(_ context.Context, 
 	if params.NewClusterParams.Hyperthreading == nil {
 		params.NewClusterParams.Hyperthreading = swag.String(models.ClusterHyperthreadingAll)
 	}
-	if params.NewClusterParams.SchedulableMasters == nil {
-		params.NewClusterParams.SchedulableMasters = swag.Bool(false)
-	}
 	if params.NewClusterParams.Platform == nil {
 		params.NewClusterParams.Platform = &models.Platform{
 			Type: common.PlatformTypePtr(models.PlatformTypeBaremetal),
@@ -306,6 +310,9 @@ func (b *bareMetalInventory) setDefaultRegisterClusterParams(_ context.Context, 
 			EnableOn: swag.String(models.DiskEncryptionEnableOnNone),
 			Mode:     swag.String(models.DiskEncryptionModeTpmv2),
 		}
+	}
+	if params.NewClusterParams.UseSchedulingDefaults == nil {
+		params.NewClusterParams.UseSchedulingDefaults = swag.Bool(true)
 	}
 
 	return params
@@ -460,6 +467,7 @@ func (b *bareMetalInventory) RegisterClusterInternal(
 			HighAvailabilityMode:  params.NewClusterParams.HighAvailabilityMode,
 			Hyperthreading:        swag.StringValue(params.NewClusterParams.Hyperthreading),
 			SchedulableMasters:    params.NewClusterParams.SchedulableMasters,
+			UseSchedulingDefaults: params.NewClusterParams.UseSchedulingDefaults,
 			Platform:              params.NewClusterParams.Platform,
 			ClusterNetworks:       params.NewClusterParams.ClusterNetworks,
 			ServiceNetworks:       params.NewClusterParams.ServiceNetworks,
@@ -470,6 +478,18 @@ func (b *bareMetalInventory) RegisterClusterInternal(
 		KubeKeyName:             kubeKey.Name,
 		KubeKeyNamespace:        kubeKey.Namespace,
 		TriggerMonitorTimestamp: time.Now(),
+	}
+
+	if cluster.SchedulableMasters != nil {
+		cluster.UseSchedulingDefaults = swag.Bool(false)
+	}
+	if swag.BoolValue(cluster.UseSchedulingDefaults) {
+		var schedulableMasters bool
+		schedulableMasters, err = b.providerRegistry.GetActualSchedulableMasters(&cluster)
+		if err != nil {
+			return nil, common.NewApiError(http.StatusInternalServerError, err)
+		}
+		cluster.SchedulableMasters = swag.Bool(schedulableMasters)
 	}
 
 	pullSecret := swag.StringValue(params.NewClusterParams.PullSecret)
@@ -661,7 +681,7 @@ func (b *bareMetalInventory) getNewClusterCPUArchitecture(newClusterParams *mode
 }
 
 func (b *bareMetalInventory) V2ImportClusterInternal(ctx context.Context, kubeKey *types.NamespacedName, id *strfmt.UUID,
-	params installer.V2ImportClusterParams, v1Flag common.InfraEnvCreateFlag) (*common.Cluster, error) {
+	params installer.V2ImportClusterParams) (*common.Cluster, error) {
 	url := installer.V2GetClusterURL{ClusterID: *id}
 
 	log := logutil.FromContext(ctx, b.log).WithField(ctxparams.ClusterId, id)
@@ -1030,9 +1050,11 @@ func (b *bareMetalInventory) InstallClusterInternal(ctx context.Context, params 
 	if cluster, err = common.GetClusterFromDBWithHosts(b.db, params.ClusterID); err != nil {
 		return nil, common.NewApiError(http.StatusNotFound, err)
 	}
+
+	var autoAssigned bool
+
 	// auto select hosts roles if not selected yet.
 	err = b.db.Transaction(func(tx *gorm.DB) error {
-		var autoAssigned bool
 		var selected bool
 		for i := range cluster.Hosts {
 			if selected, err = b.hostApi.AutoAssignRole(ctx, cluster.Hosts[i], tx); err != nil {
@@ -1054,17 +1076,20 @@ func (b *bareMetalInventory) InstallClusterInternal(ctx context.Context, params 
 		return nil, err
 	}
 
-	if err = b.refreshAllHostsOnInstall(ctx, cluster); err != nil {
-		return nil, err
-	}
-	if _, err = b.clusterApi.RefreshStatus(ctx, cluster, b.db); err != nil {
-		return nil, err
+	if autoAssigned {
+		if err = b.refreshAllHostsOnInstall(ctx, cluster); err != nil {
+			return nil, err
+		}
+		if _, err = b.clusterApi.RefreshStatus(ctx, cluster, b.db); err != nil {
+			return nil, err
+		}
+
+		// Reload again after refresh
+		if cluster, err = common.GetClusterFromDBWithHosts(b.db, params.ClusterID); err != nil {
+			return nil, common.NewApiError(http.StatusNotFound, err)
+		}
 	}
 
-	// Reload again after refresh
-	if cluster, err = common.GetClusterFromDBWithHosts(b.db, params.ClusterID); err != nil {
-		return nil, common.NewApiError(http.StatusNotFound, err)
-	}
 	// Verify cluster is ready to install
 	if ok, reason := b.clusterApi.IsReadyForInstallation(cluster); !ok {
 		return nil, common.NewApiError(http.StatusConflict,
@@ -1169,7 +1194,8 @@ func (b *bareMetalInventory) InstallSingleDay2HostInternal(ctx context.Context, 
 			tx.Rollback()
 		}
 		if r := recover(); r != nil {
-			log.Error("InstallSingleDay2HostInternal failed")
+			log.Errorf("InstallSingleDay2HostInternal failed to recover: %s", r)
+			log.Error(string(debug.Stack()))
 			tx.Rollback()
 		}
 	}()
@@ -1363,7 +1389,8 @@ func (b *bareMetalInventory) UpdateClusterInstallConfigInternal(ctx context.Cont
 			tx.Rollback()
 		}
 		if r := recover(); r != nil {
-			log.Error("UpdateClusterInstallConfigInternal failed to recover")
+			log.Errorf("UpdateClusterInstallConfigInternal failed to recover: %s", r)
+			log.Error(string(debug.Stack()))
 			tx.Rollback()
 		}
 	}()
@@ -1618,7 +1645,8 @@ func (b *bareMetalInventory) v2UpdateClusterInternal(ctx context.Context, params
 			tx.Rollback()
 		}
 		if r := recover(); r != nil {
-			log.Error("update cluster failed")
+			log.Errorf("update cluster failed to recover: %s", r)
+			log.Error(string(debug.Stack()))
 			tx.Rollback()
 		}
 	}()
@@ -1681,10 +1709,12 @@ func (b *bareMetalInventory) v2UpdateClusterInternal(ctx context.Context, params
 		return nil, err
 	}
 
-	err = b.updateHostsAndClusterStatus(ctx, cluster, tx, log)
-	if err != nil {
-		log.WithError(err).Errorf("failed to validate or update cluster %s state or its hosts", cluster.ID)
-		return nil, common.NewApiError(http.StatusInternalServerError, err)
+	if interactivity == Interactive {
+		err = b.updateHostsAndClusterStatus(ctx, cluster, tx, log)
+		if err != nil {
+			log.WithError(err).Errorf("failed to validate or update cluster %s state or its hosts", cluster.ID)
+			return nil, common.NewApiError(http.StatusInternalServerError, err)
+		}
 	}
 
 	b.updateClusterNetworkVMUsage(cluster, params.ClusterUpdateParams, usages, log)
@@ -1809,16 +1839,12 @@ func (b *bareMetalInventory) updateNonDhcpNetworkParams(updates map[string]inter
 				return common.NewApiError(http.StatusBadRequest, errors.Wrap(err, "Calculate machine network CIDR"))
 			}
 			if primaryMachineNetworkCidr != "" {
-				if network.IsMachineCidrAvailable(cluster) {
-					cluster.MachineNetworks[0].Cidr = models.Subnet(primaryMachineNetworkCidr)
-				} else {
-					cluster.MachineNetworks = []*models.MachineNetwork{{Cidr: models.Subnet(primaryMachineNetworkCidr)}}
-				}
-				// In case we calculated Machine Network automatically (because conditions for
-				// doing so were met), we update the `params` payload so that from the
-				// perspective of the DB write/delete actions it looks like a valid update
-				// operation. Without that we don't have other way to mark this field of the
-				// cluster as dirty.
+				// We set the machine networks in the ClusterUpdateParams, so they will be viewed as part of the request
+				// to update the cluster
+
+				// Earlier in this function, if reqDualStack was false and the MachineNetworks was non-empty, the function
+				// returned with an error.  Therefore, params.ClusterUpdateParams.MachineNetworks is empty here before
+				// the assignment below.
 				params.ClusterUpdateParams.MachineNetworks = []*models.MachineNetwork{{Cidr: models.Subnet(primaryMachineNetworkCidr)}}
 			}
 		}
@@ -1931,10 +1957,28 @@ func (b *bareMetalInventory) updateClusterData(_ context.Context, cluster *commo
 			return common.NewApiError(http.StatusBadRequest, errors.Errorf(msg))
 		}
 	}
+
+	if params.ClusterUpdateParams.UseSchedulingDefaults != nil {
+		useSchedulingDefaults := swag.BoolValue(params.ClusterUpdateParams.UseSchedulingDefaults)
+		updates["use_scheduling_defaults"] = useSchedulingDefaults
+		if useSchedulingDefaults {
+			var schedulableMasters bool
+			schedulableMasters, err = b.providerRegistry.GetActualSchedulableMasters(cluster)
+			if err != nil {
+				msg := fmt.Sprintf("Can't update 'use_scheduling_defaults' to '%t' for cluster %s", useSchedulingDefaults, cluster.ID)
+				log.Error(msg)
+				return common.NewApiError(http.StatusInternalServerError, errors.Errorf(msg))
+			}
+			updates["schedulable_masters"] = schedulableMasters
+			b.setUsage(false, usage.SchedulableMasters, nil, usages)
+		}
+	}
+
 	if params.ClusterUpdateParams.SchedulableMasters != nil {
-		value := swag.BoolValue(params.ClusterUpdateParams.SchedulableMasters)
-		updates["schedulable_masters"] = value
-		b.setUsage(value, usage.SchedulableMasters, nil, usages)
+		schedulableMasters := swag.BoolValue(params.ClusterUpdateParams.SchedulableMasters)
+		updates["schedulable_masters"] = schedulableMasters
+		updates["use_scheduling_defaults"] = false
+		b.setUsage(true, usage.SchedulableMasters, nil, usages)
 	}
 
 	if params.ClusterUpdateParams.DiskEncryption != nil {
@@ -1973,8 +2017,9 @@ func (b *bareMetalInventory) updateClusterData(_ context.Context, cluster *commo
 func (b *bareMetalInventory) updateNetworks(db *gorm.DB, params installer.V2UpdateClusterParams, updates map[string]interface{},
 	cluster *common.Cluster, userManagedNetworking, vipDhcpAllocation bool) error {
 	var err error
+	var updated bool
 
-	if params.ClusterUpdateParams.ClusterNetworks != nil {
+	if params.ClusterUpdateParams.ClusterNetworks != nil && !network.AreClusterNetworksIdentical(params.ClusterUpdateParams.ClusterNetworks, cluster.ClusterNetworks) {
 		for _, clusterNetwork := range params.ClusterUpdateParams.ClusterNetworks {
 			if err = network.VerifyClusterOrServiceCIDR(string(clusterNetwork.Cidr)); err != nil {
 				return common.NewApiError(http.StatusBadRequest, errors.Wrapf(err, "Cluster network CIDR %s", string(clusterNetwork.Cidr)))
@@ -1990,24 +2035,32 @@ func (b *bareMetalInventory) updateNetworks(db *gorm.DB, params installer.V2Upda
 			}
 		}
 		cluster.ClusterNetworks = params.ClusterUpdateParams.ClusterNetworks
+		updated = true
 	}
 
-	if params.ClusterUpdateParams.ServiceNetworks != nil {
+	if params.ClusterUpdateParams.ServiceNetworks != nil && !network.AreServiceNetworksIdentical(params.ClusterUpdateParams.ServiceNetworks, cluster.ServiceNetworks) {
 		for _, serviceNetwork := range params.ClusterUpdateParams.ServiceNetworks {
 			if err = network.VerifyClusterOrServiceCIDR(string(serviceNetwork.Cidr)); err != nil {
 				return common.NewApiError(http.StatusBadRequest, errors.Wrapf(err, "Service network CIDR %s", string(serviceNetwork.Cidr)))
 			}
 		}
 		cluster.ServiceNetworks = params.ClusterUpdateParams.ServiceNetworks
+		updated = true
 	}
 
-	if params.ClusterUpdateParams.MachineNetworks != nil {
+	if params.ClusterUpdateParams.MachineNetworks != nil && !network.AreMachineNetworksIdentical(params.ClusterUpdateParams.MachineNetworks, cluster.MachineNetworks) {
 		for _, machineNetwork := range params.ClusterUpdateParams.MachineNetworks {
 			if err = network.VerifyMachineCIDR(string(machineNetwork.Cidr), common.IsSingleNodeCluster(cluster)); err != nil {
 				return common.NewApiError(http.StatusBadRequest, errors.Wrapf(err, "Machine network CIDR '%s'", string(machineNetwork.Cidr)))
 			}
 		}
 		cluster.MachineNetworks = params.ClusterUpdateParams.MachineNetworks
+		updated = true
+	}
+
+	if swag.BoolValue(params.ClusterUpdateParams.VipDhcpAllocation) != swag.BoolValue(cluster.VipDhcpAllocation) ||
+		swag.BoolValue(params.ClusterUpdateParams.UserManagedNetworking) != swag.BoolValue(cluster.UserManagedNetworking) {
+		updated = true
 	}
 
 	if common.IsSliceNonEmpty(params.ClusterUpdateParams.MachineNetworks) {
@@ -2039,8 +2092,11 @@ func (b *bareMetalInventory) updateNetworks(db *gorm.DB, params installer.V2Upda
 			}
 		}
 	}
-
-	return b.updateNetworkTables(db, cluster, params)
+	if updated {
+		updates["trigger_monitor_timestamp"] = time.Now()
+		return b.updateNetworkTables(db, cluster, params)
+	}
+	return nil
 }
 
 func (b *bareMetalInventory) updateNetworkTables(db *gorm.DB, cluster *common.Cluster, params installer.V2UpdateClusterParams) error {
@@ -3348,7 +3404,8 @@ func (b *bareMetalInventory) CancelInstallationInternal(ctx context.Context, par
 			tx.Rollback()
 		}
 		if r := recover(); r != nil {
-			log.Error("cancel installation failed")
+			log.Errorf("cancel installation failed to recover: %s", r)
+			log.Error(string(debug.Stack()))
 			tx.Rollback()
 		}
 	}()
@@ -4246,7 +4303,8 @@ func (b *bareMetalInventory) V2RegisterHost(ctx context.Context, params installe
 			tx.Rollback()
 		}
 		if r := recover(); r != nil {
-			log.Error("RegisterHost failed")
+			log.Errorf("RegisterHost failed to recover: %s", r)
+			log.Error(string(debug.Stack()))
 			tx.Rollback()
 		}
 	}()
@@ -4408,7 +4466,8 @@ func (b *bareMetalInventory) V2GetNextSteps(ctx context.Context, params installe
 			tx.Rollback()
 		}
 		if r := recover(); r != nil {
-			log.Error("get next steps failed")
+			log.Errorf("get next steps failed to recover: %s", r)
+			log.Error(string(debug.Stack()))
 			tx.Rollback()
 		}
 	}()
@@ -4624,12 +4683,38 @@ func (b *bareMetalInventory) BindHostInternal(ctx context.Context, params instal
 		return nil, common.NewApiError(http.StatusInternalServerError, err)
 	}
 
+	if err = b.refreshSchedulableMasters(ctx, cluster); err != nil {
+		log.WithError(err).Errorf("Failed to refresh schedulable_masters while binding host <%s> to cluster <%s>",
+			params.HostID, *params.BindHostParams.ClusterID)
+		return nil, common.NewApiError(http.StatusInternalServerError, err)
+	}
+
 	host, err = common.GetHostFromDB(b.db, params.InfraEnvID.String(), params.HostID.String())
 	if err != nil {
 		return nil, common.NewApiError(http.StatusInternalServerError, err)
 	}
 
 	return host, nil
+}
+
+func (b *bareMetalInventory) refreshSchedulableMasters(ctx context.Context, cluster *common.Cluster) error {
+	if swag.BoolValue(cluster.UseSchedulingDefaults) {
+		schedulableMasters, err := b.providerRegistry.GetActualSchedulableMasters(cluster)
+		if err != nil {
+			return errors.Errorf("Failed get actual schedulable masters for cluster %s", cluster.ID)
+		}
+		clusterUpdateParams := installer.V2UpdateClusterParams{
+			ClusterID: *cluster.ID,
+			ClusterUpdateParams: &models.V2ClusterUpdateParams{
+				SchedulableMasters: swag.Bool(schedulableMasters),
+			},
+		}
+		_, err = b.UpdateClusterNonInteractive(ctx, clusterUpdateParams)
+		if err != nil {
+			return errors.Errorf("Failed to refresh schedulable_masters on cluster %s", cluster.ID)
+		}
+	}
+	return nil
 }
 
 func (b *bareMetalInventory) UnbindHostInternal(ctx context.Context, params installer.UnbindHostParams) (*common.Host, error) {
@@ -4643,6 +4728,11 @@ func (b *bareMetalInventory) UnbindHostInternal(ctx context.Context, params inst
 	}
 	if host.ClusterID == nil {
 		return nil, common.NewApiError(http.StatusConflict, errors.Errorf("Host %s is already unbound", params.HostID))
+	}
+
+	cluster, err := common.GetClusterFromDB(b.db, *host.ClusterID, common.SkipEagerLoading)
+	if err != nil {
+		return nil, common.NewApiError(http.StatusInternalServerError, errors.Errorf("Failed to find cluster %s", host.ClusterID))
 	}
 
 	infraEnv, err := common.GetInfraEnvFromDB(b.db, params.InfraEnvID)
@@ -4661,6 +4751,12 @@ func (b *bareMetalInventory) UnbindHostInternal(ctx context.Context, params inst
 
 	if _, err = b.refreshClusterStatus(ctx, host.ClusterID, b.db); err != nil {
 		log.WithError(err).Warnf("Failed to refresh cluster after unbind of host <%s>", params.HostID)
+	}
+
+	if err = b.refreshSchedulableMasters(ctx, cluster); err != nil {
+		log.WithError(err).Errorf("Failed to refresh schedulable_masters while unbinding host <%s> from cluster <%s>",
+			params.HostID, *host.ClusterID)
+		return nil, common.NewApiError(http.StatusInternalServerError, err)
 	}
 
 	host, err = common.GetHostFromDB(b.db, params.InfraEnvID.String(), params.HostID.String())
@@ -4906,7 +5002,7 @@ func (b *bareMetalInventory) V2UpdateHostLogsProgress(ctx context.Context, param
 	return installer.NewV2UpdateHostLogsProgressNoContent()
 }
 
-func (b *bareMetalInventory) V2UpdateHostInternal(ctx context.Context, params installer.V2UpdateHostParams) (*common.Host, error) {
+func (b *bareMetalInventory) V2UpdateHostInternal(ctx context.Context, params installer.V2UpdateHostParams, interactivity Interactivity) (*common.Host, error) {
 	log := logutil.FromContext(ctx, b.log)
 	var c *models.Cluster
 	var cluster *common.Cluster
@@ -4921,7 +5017,8 @@ func (b *bareMetalInventory) V2UpdateHostInternal(ctx context.Context, params in
 			tx.Rollback()
 		}
 		if r := recover(); r != nil {
-			log.Error("update host failed")
+			log.Errorf("update host failed to recover: %s", r)
+			log.Error(string(debug.Stack()))
 			tx.Rollback()
 		}
 	}()
@@ -4979,10 +5076,12 @@ func (b *bareMetalInventory) V2UpdateHostInternal(ctx context.Context, params in
 		}
 	}
 
-	err = b.refreshAfterUpdate(ctx, cluster, host, tx)
-	if err != nil {
-		log.WithError(err).Errorf("Failed to refresh host %s, infra env %s during update", host.ID, host.InfraEnvID)
-		return nil, err
+	if interactivity == Interactive {
+		err = b.refreshAfterUpdate(ctx, cluster, host, tx)
+		if err != nil {
+			log.WithError(err).Errorf("Failed to refresh host %s, infra env %s during update", host.ID, host.InfraEnvID)
+			return nil, err
+		}
 	}
 
 	if err = tx.Commit().Error; err != nil {
@@ -5227,4 +5326,16 @@ func (b *bareMetalInventory) ListClusterHosts(ctx context.Context, params instal
 		}
 	}
 	return installer.NewListClusterHostsOK().WithPayload(hostList)
+}
+
+func (b *bareMetalInventory) GetKnownHostApprovedCounts(clusterID strfmt.UUID) (registered, approved int, err error) {
+	return b.hostApi.GetKnownHostApprovedCounts(clusterID)
+}
+
+func (b *bareMetalInventory) HostWithCollectedLogsExists(clusterId strfmt.UUID) (bool, error) {
+	return b.hostApi.HostWithCollectedLogsExists(clusterId)
+}
+
+func (b *bareMetalInventory) GetKnownApprovedHosts(clusterId strfmt.UUID) ([]*common.Host, error) {
+	return b.hostApi.GetKnownApprovedHosts(clusterId)
 }

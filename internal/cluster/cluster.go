@@ -28,6 +28,7 @@ import (
 	"github.com/openshift/assisted-service/internal/metrics"
 	"github.com/openshift/assisted-service/internal/network"
 	"github.com/openshift/assisted-service/internal/operators"
+	"github.com/openshift/assisted-service/internal/provider/registry"
 	"github.com/openshift/assisted-service/models"
 	"github.com/openshift/assisted-service/pkg/auth"
 	"github.com/openshift/assisted-service/pkg/commonutils"
@@ -155,12 +156,13 @@ type Manager struct {
 	dnsApi                dns.DNSApi
 	monitorQueryGenerator *common.MonitorClusterQueryGenerator
 	authHandler           auth.Authenticator
+	providerRegistry      registry.ProviderRegistry
 }
 
 func NewManager(cfg Config, log logrus.FieldLogger, db *gorm.DB, eventsHandler eventsapi.Handler,
 	hostAPI host.API, metricApi metrics.API, manifestsGeneratorAPI network.ManifestsGeneratorAPI,
 	leaderElector leader.Leader, operatorsApi operators.API, ocmClient *ocm.Client, objectHandler s3wrapper.API,
-	dnsApi dns.DNSApi, authHandler auth.Authenticator) *Manager {
+	dnsApi dns.DNSApi, authHandler auth.Authenticator, providerRegistry registry.ProviderRegistry) *Manager {
 	th := &transitionHandler{
 		log:                 log,
 		db:                  db,
@@ -187,6 +189,7 @@ func NewManager(cfg Config, log logrus.FieldLogger, db *gorm.DB, eventsHandler e
 		objectHandler:         objectHandler,
 		dnsApi:                dnsApi,
 		authHandler:           authHandler,
+		providerRegistry:      providerRegistry,
 	}
 }
 
@@ -1235,7 +1238,8 @@ func (m Manager) PermanentClustersDeletion(ctx context.Context, olderThan strfmt
 }
 
 func (m *Manager) GetClusterByKubeKey(key types.NamespacedName) (*common.Cluster, error) {
-	c, err := common.GetClusterFromDBWhere(m.db, common.UseEagerLoading, common.SkipDeletedRecords, "kube_key_name = ? and kube_key_namespace = ?", key.Name, key.Namespace)
+	c, err := common.GetClusterFromDBWhere(common.LoadClusterTablesFromDB(m.db, common.HostsTable), common.SkipEagerLoading, common.SkipDeletedRecords,
+		"kube_key_name = ? and kube_key_namespace = ?", key.Name, key.Namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -1252,9 +1256,6 @@ func (m *Manager) GenerateAdditionalManifests(ctx context.Context, cluster *comm
 		if err := m.manifestsGeneratorAPI.AddDnsmasqForSingleNode(ctx, log, cluster); err != nil {
 			return errors.Wrap(err, "failed to add dnsmasq manifest")
 		}
-		if err := m.manifestsGeneratorAPI.AddNodeIpHint(ctx, log, cluster); err != nil {
-			return errors.Wrap(err, "failed to add node ip hint manifest")
-		}
 	}
 
 	if err := m.rp.operatorsAPI.GenerateManifests(ctx, cluster); err != nil {
@@ -1263,13 +1264,9 @@ func (m *Manager) GenerateAdditionalManifests(ctx context.Context, cluster *comm
 	if err := m.manifestsGeneratorAPI.AddTelemeterManifest(ctx, log, cluster); err != nil {
 		return errors.Wrap(err, "failed to add telemeter manifest")
 	}
-
-	if common.AreMastersSchedulable(cluster) {
-		if err := m.manifestsGeneratorAPI.AddSchedulableMastersManifest(ctx, log, cluster); err != nil {
-			return errors.Wrap(err, "failed to add schedulable masters manifest")
-		}
+	if err := m.providerRegistry.GenerateProviderManifests(ctx, cluster); err != nil {
+		return errors.Wrap(err, "failed to add provider manifests")
 	}
-
 	if err := m.manifestsGeneratorAPI.AddDiskEncryptionManifest(ctx, log, cluster); err != nil {
 		return errors.Wrap(err, "failed to add disk encryption manifest")
 	}

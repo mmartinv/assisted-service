@@ -5,7 +5,7 @@ go 1.17
 require (
 	github.com/alecthomas/units v0.0.0-20190924025748-f65c72e2690d
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d
-	github.com/aws/aws-sdk-go v1.42.53
+	github.com/aws/aws-sdk-go v1.44.15
 	github.com/buger/jsonparser v1.1.1
 	github.com/cavaliercoder/go-cpio v0.0.0-20180626203310-925f9528c45e
 	github.com/containers/image/v5 v5.20.0
@@ -14,7 +14,7 @@ require (
 	github.com/danielerez/go-dns-client v0.0.0-20200630114514-0b60d1703f0b
 	github.com/dustin/go-humanize v1.0.0
 	github.com/filanov/stateswitch v0.0.0-20200714113403-51a42a34c604
-	github.com/go-gormigrate/gormigrate/v2 v2.0.0
+	github.com/go-gormigrate/gormigrate/v2 v2.0.1
 	github.com/go-openapi/errors v0.20.2
 	github.com/go-openapi/loads v0.21.1
 	github.com/go-openapi/runtime v0.19.24
@@ -42,6 +42,7 @@ require (
 	github.com/onsi/gomega v1.19.0
 	github.com/openshift-online/ocm-sdk-go v0.1.205
 	github.com/openshift/api v3.9.1-0.20191111211345-a27ff30ebf09+incompatible
+	github.com/openshift/assisted-image-service v0.0.0-20220506122314-2f689a1084b8
 	github.com/openshift/assisted-service/api v0.0.0
 	github.com/openshift/assisted-service/models v0.0.0
 	github.com/openshift/client-go v0.0.0-20201020074620-f8fd44879f7c
@@ -55,7 +56,7 @@ require (
 	github.com/pelletier/go-toml v1.9.5
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.56.2
-	github.com/prometheus/client_golang v1.12.1
+	github.com/prometheus/client_golang v1.12.2
 	github.com/rs/cors v1.8.2
 	github.com/sirupsen/logrus v1.8.1
 	github.com/slok/go-http-metrics v0.10.0
